@@ -1,5 +1,5 @@
 import numpy as np
-import scipy as sp
+from scipy.optimize import minimize
 import copy
 
 
@@ -56,7 +56,6 @@ def setup(features, outcome, nLayers, nUnits, seed = 1234):
   dim2 += ([nUnits + 1] * nLayers)
   dim2.append(nOutcome)
 
-  # would it be more efficient to have np array of arrays?
   layers_size = [np.empty(x) for x in zip(dim1, dim2)]
 
   # initialise bias
@@ -92,7 +91,7 @@ def setup(features, outcome, nLayers, nUnits, seed = 1234):
 
   # reshape vectors into matrices
   for i in np.arange(3):
-    weights_size[i] = weights_size[i].reshape([dim1[i], dim2[i]])
+    weights_size[i] = weights_size[i].reshape([dim1[i], dim2[i]], order='F')
 
   ###############################################
   # initialise outcome matrix
@@ -107,9 +106,12 @@ def setup(features, outcome, nLayers, nUnits, seed = 1234):
   return([layers_size, weights_size, outcomeMat])
 
 
-def forward_prop(layers, weights, nLayers): #nLayers can be inferred
+def forward_prop(layers, weights):
+  # hidden layers- subtract input and output
+  nLayers = len(layers) - 2
   # make a template for z
-  z = layers[1:len(layers)]
+  z = copy.deepcopy(layers[1:len(layers)])
+
 
   # propogate through
   for i in np.arange(nLayers):
@@ -122,55 +124,45 @@ def forward_prop(layers, weights, nLayers): #nLayers can be inferred
   return([layers, z])
 
 
-def back_prop(layers_size, weights_size, penalty, outcome, unrollWeights):
+def back_prop(unrollWeights, layers_size, weights_size, penalty, outcome):
   nLayers = len(layers_size) - 2
   m = outcome.shape[0]
-  weights = rollParams(unrollWeights, nLayers, weights_size)
+  weights = rollParams(unrollWeights, weights_size)
 
-  # forward propogate
-  tmp = forward_prop(layers_size, weights, nLayers)
+  ###############################################
+  # forward propogation for cost and penalty
+  ###############################################
+  tmp = forward_prop(layers_size, weights)
   layers = tmp[0]
   z = tmp[1]
 
-  ###############################################
-  # cost
-  ###############################################
+  # cost and penalty term
   fn = cost(m, layers[nLayers + 1], outcome)
+  fn += penalty_term(m, penalty, weights)
 
-  # (1.0 / m) * \
-  #   sum( \
-  #   np.sum((-outcome) * np.log(layers[nLayers + 1]) - \
-  #   (1.0 - outcome) * np.log(1.0 - layers[nLayers + 1]), \
-  #   axis = 1) \
-  # )
-
-  ###############################################
-  # penalty - make a seperate function for this
-  ###############################################
-  #penalty_term = sum([penalty / (2.0 * m) * sum(np.sum(x[:, 1:np.shape(x)[1]]**2, axis = 1)) for x in weights])
-
-  # add penalty to cost
-  fn = fn + penalty_term(m, penalty, weights)
+  # CORRECT UP TO HERE: gradients differ however.
 
   ###############################################
   # back propogation for errors
   ###############################################
+
   # copy for templates
   delta = z[:]
   gradient = weights[:]
 
   # errors
   delta[nLayers] = layers[nLayers + 1] - outcome
-  for i in np.arange(nLayers):
-    delta[i] = np.dot(delta[i + 1], weights[i + 1])[:, 1:weights[i+1].shape[1]] * sigmoidGradient(z[i])
+  for i in np.arange(nLayers-1, -1, -1):
+    delta[i] = np.dot(delta[i + 1], weights[i + 1])[:, 1:weights[i+1].shape[1]] \
+    * sigmoidGradient(z[i])
 
   # gradients
   for i in np.arange(nLayers + 1):
     gradient[i] = np.dot(np.transpose(delta[i]), layers[i]) / m
 
-    gradient[i][:, 1:gradient[i].shape[1]] = \
-      gradient[i][:, 1:gradient[i].shape[1]] + (penalty / m) * \
+    gradient[i][:, 1:gradient[i].shape[1]] += (penalty / m) * \
       weights[i][:, 1:gradient[i].shape[1]]
+
 
   # unroll gradient
   gr = unrollParams(gradient)
@@ -192,33 +184,32 @@ def cost(m, outcome_layer, outcome):
     )
   return(tmp)
 
+
+
 def penalty_term(m, penalty, weights):
   tmp = sum(\
-    [penalty / (2.0 * m) * sum(np.sum(x[:, 1:np.shape(x)[1]]**2, axis = 1))\
+    [(penalty / (2.0 * m)) * sum(np.sum(x[:, 1:np.shape(x)[1]]**2, axis = 1))\
     for x in weights]\
     )
   return(tmp)
 
-def rollParams(x, nLayers, weights_size): #nLayers can be inferred
+def rollParams(x, weights_size):
+  nLayers = len(weights_size) - 1
   pos = 0
   for i in np.arange(nLayers + 1):
-
     dim1 = weights_size[i].shape[0]
     dim2 = weights_size[i].shape[1]
     size = weights_size[i].size
-
     tmp1 = pos + size
     tmp2 = np.array([x[pos:(tmp1)]])
-
-    weights_size[i] = tmp2.reshape(dim1, dim2)
+    weights_size[i] = tmp2.reshape(dim1, dim2, order='F')
     pos += size
-
 
   return(weights_size)
 
 
 def unrollParams(x):
-  stretched = [mat.reshape(1, mat.size)  for mat in x]
+  stretched = [mat.reshape(1, mat.size, order='F')  for mat in x]
   out = stretched[0]
   for i in np.arange(1,len(stretched)):
     out = np.append(out, stretched[i])
@@ -227,28 +218,74 @@ def unrollParams(x):
 
 def main():
 
-  penalty = 0.1
+  penalty = 0.01
   data = np.loadtxt("iris.txt")
+  data2 = np.loadtxt("nneptrWeights.dat")
   features = data[:, 0:4]
   outcome = data[:, 4]
   outcome.astype(int)
 
   nLayers = 2
-  templates = setup(features, outcome, nLayers, nUnits = 10, seed = 1234)
-  #print(templates[2])
+
+  # checked vs nneptr: all templates correct shape
+  templates = setup(features, outcome, nLayers, nUnits = 20, seed = 123)
+  layers_size = templates[0][:]
+  weights_size = templates[1][:]
+  outcome_mat = templates[2][:]
+
+  # roll / unroll tested and correct:
+
+  #######################################
+  # test
+  weights_size = rollParams(data2, weights_size)
+  init_weights = unrollParams(weights_size)
+
+  #print(weights_size)
+  #print(init_weights)
 
   # need a proper test here
-  fp_test = forward_prop(templates[0], templates[1], nLayers)
-  #print(fp_test[1])
+  # seems reasonable though
+ #fp_test = forward_prop(layers_size, weights_size)
 
 
 
-  # test rolling and unrolling works
-  hat = unrollParams(templates[1])
-  mat = rollParams(hat, 2, templates[1])
-  #print(mat ==  templates[1])
+  cost, grad = back_prop(init_weights, layers_size, weights_size, penalty, outcome_mat)
+  #print(grad)
+  #print(cost)
 
-  back_prop(templates[0], templates[1], penalty, templates[2], unrollParams(templates[1]))
+
+
+
+
+  #cost, grad = back_prop(templates[0], templates[1], penalty, templates[2], unrollParams(templates[1]))
+
+
+ # print(cost, grad)
+
+
+  # now for scipy optimisation:
+  opt_weights = minimize(
+    fun = back_prop,
+    x0 = init_weights,
+    method = 'L-BFGS-B',
+    jac = True,
+    args = (layers_size,\
+    weights_size,\
+    penalty,\
+    outcome_mat)
+    )
+
+  #print(opt_weights.x)
+
+  final_weights = rollParams(opt_weights.x, weights_size)
+  #print(final_weights)
+
+
+  fp_final = forward_prop(layers_size, final_weights)
+
+  print(fp_final[0])
+
+ # print(params)
 
 
   # ready to test setup and functions - then to invetsigate optimisation and building the class
