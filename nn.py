@@ -56,14 +56,14 @@ def setup(features, outcome, nLayers, nUnits, seed = 1234):
   dim2 += ([nUnits + 1] * nLayers)
   dim2.append(nOutcome)
 
-  layers_size = [np.empty(x) for x in zip(dim1, dim2)]
+  a_size = [np.empty(x) for x in zip(dim1, dim2)]
 
   # initialise bias
   for i in np.arange(nLayers + 1):
-    layers_size[i][:, 0] = 1.0
+    a_size[i][:, 0] = 1.0
 
   # initialise input
-  layers_size[0][:, 1:] = features
+  a_size[0][:, 1:] = features
 
   ###############################################
   # initialise dimensions of weights (weights)
@@ -78,12 +78,12 @@ def setup(features, outcome, nLayers, nUnits, seed = 1234):
   # initialise vector of correct length to be reshaped
   weights_size = list()
   for i in np.arange(nLayers + 1):
-    epsilon_init = np.sqrt(6 / np.shape(layers_size[i])[0])
-    nC = np.shape(layers_size[i][1])[0]
+    epsilon_init = np.sqrt(6 / np.shape(a_size[i])[0])
+    nC = np.shape(a_size[i][1])[0]
     if i != nLayers:
-      nR = np.shape(layers_size[i + 1][1])[0] - 1
+      nR = np.shape(a_size[i + 1][1])[0] - 1
     else:
-      nR = np.shape(layers_size[i + 1][1])[0]
+      nR = np.shape(a_size[i + 1][1])[0]
     weights_size.append(
       (np.random.uniform(0, 1, (nR * nC)) * 2.0 * epsilon_init) -
        epsilon_init
@@ -103,36 +103,36 @@ def setup(features, outcome, nLayers, nUnits, seed = 1234):
   ###############################################
   # return matrix templates
   ###############################################
-  return([layers_size, weights_size, outcomeMat])
+  return([a_size, weights_size, outcomeMat])
 
 
-def forward_prop(layers, weights):
+def forward_prop(activations, weights):
   # hidden layers- subtract input and output
-  nLayers = len(layers) - 2
+  nLayers = len(activations) - 2
   # make a template for z
-  z = copy.deepcopy(layers[1:len(layers)])
-
+  #z = copy.deepcopy(layers[1:len(layers)])
+  z = activations[1:len(activations)][:]
 
   # propogate through
   for i in np.arange(nLayers):
-    z[i] = np.dot(layers[i], np.transpose(weights[i]))
-    layers[i + 1][:, 1:layers[i + 1].shape[1]] = sigmoid(z[i])
+    z[i] = np.dot(activations[i], np.transpose(weights[i]))
+    activations[i + 1][:, 1:activations[i + 1].shape[1]] = sigmoid(z[i])
 
-  z[nLayers] = np.dot(layers[nLayers], np.transpose(weights[nLayers]))
-  layers[nLayers + 1] = sigmoid(z[nLayers])
+  z[nLayers] = np.dot(activations[nLayers], np.transpose(weights[nLayers]))
+  activations[nLayers + 1] = sigmoid(z[nLayers])
 
-  return([layers, z])
+  return([activations, z])
 
 
-def back_prop(unrollWeights, layers_size, weights_size, penalty, outcome):
-  nLayers = len(layers_size) - 2
+def back_prop(unrollWeights, a_size, weights_size, penalty, outcome):
+  nLayers = len(a_size) - 2
   m = outcome.shape[0]
   weights = rollParams(unrollWeights, weights_size)
 
   ###############################################
   # forward propogation for cost and penalty
   ###############################################
-  tmp = forward_prop(layers_size, weights)
+  tmp = forward_prop(a_size, weights)
   layers = tmp[0]
   z = tmp[1]
 
@@ -169,6 +169,58 @@ def back_prop(unrollWeights, layers_size, weights_size, penalty, outcome):
 
   # return cost function and gradient
   return(fn, gr)
+
+
+
+def bp(a_size, weights_size, penalty, outcome):
+  nLayers = len(a_size) - 2
+  m = outcome.shape[0]
+  gradient = weights_size[:]
+  delta = a_size[1:len(a_size)]
+
+  def bp_inner(unrollWeights):
+    weights = rollParams(unrollWeights, weights_size)
+    ###############################################
+    # forward propogation for cost and penalty
+    ###############################################
+    tmp = forward_prop(a_size, weights)
+    activations = tmp[0]
+    z = tmp[1]
+
+    # cost and penalty term
+    fn = cost(m, activations[nLayers + 1], outcome)
+    fn += penalty_term(m, penalty, weights)
+
+    ###############################################
+    # back propogation for errors
+    ###############################################
+
+    # copy for templates
+    delta = z[:]
+    #gradient = weights[:]
+
+    # errors
+    delta[nLayers] = activations[nLayers + 1] - outcome
+    for i in np.arange(nLayers-1, -1, -1):
+      delta[i] = np.dot(delta[i + 1], weights[i + 1])[:, 1:weights[i+1].shape[1]] \
+      * sigmoidGradient(z[i])
+
+    # gradients
+    for i in np.arange(nLayers + 1):
+      gradient[i] = np.dot(np.transpose(delta[i]), activations[i]) / m
+
+      gradient[i][:, 1:gradient[i].shape[1]] += (penalty / m) * \
+        weights[i][:, 1:gradient[i].shape[1]]
+
+    # unroll gradient
+    gr = unrollParams(gradient)
+
+    # return cost function and gradient
+    return(fn, gr)
+
+  return(bp_inner)
+
+
 
 def sigmoid(x):
   return(1.0 / (1.0 + np.exp(-x)))
@@ -216,6 +268,13 @@ def unrollParams(x):
 
   return(out)
 
+
+# how to do a closure:
+def power(x):
+  def power_inner(y):
+    return(y ** x)
+  return(power_inner)
+
 def main():
 
   penalty = 0.01
@@ -229,7 +288,7 @@ def main():
 
   # checked vs nneptr: all templates correct shape
   templates = setup(features, outcome, nLayers, nUnits = 20, seed = 123)
-  layers_size = templates[0][:]
+  a_size = templates[0][:]
   weights_size = templates[1][:]
   outcome_mat = templates[2][:]
 
@@ -245,17 +304,15 @@ def main():
 
   # need a proper test here
   # seems reasonable though
- #fp_test = forward_prop(layers_size, weights_size)
+ #fp_test = forward_prop(a_size, weights_size)
 
 
 
-  cost, grad = back_prop(init_weights, layers_size, weights_size, penalty, outcome_mat)
+  #cost, grad = back_prop(init_weights, a_size, weights_size, penalty, outcome_mat)
   #print(grad)
   #print(cost)
 
-
-
-
+  bp_closure = bp(a_size, weights_size, penalty, outcome_mat)
 
   #cost, grad = back_prop(templates[0], templates[1], penalty, templates[2], unrollParams(templates[1]))
 
@@ -263,17 +320,25 @@ def main():
  # print(cost, grad)
 
 
-  # now for scipy optimisation:
   opt_weights = minimize(
-    fun = back_prop,
-    x0 = init_weights,
-    method = 'L-BFGS-B',
-    jac = True,
-    args = (layers_size,\
-    weights_size,\
-    penalty,\
-    outcome_mat)
-    )
+  fun = bp_closure,
+  x0 = init_weights,
+  method = 'L-BFGS-B',
+  jac = True
+  )
+
+
+  # now for scipy optimisation:
+  # opt_weights = minimize(
+  #   fun = back_prop,
+  #   x0 = init_weights,
+  #   method = 'L-BFGS-B',
+  #   jac = True,
+  #   args = (a_size,\
+  #   weights_size,\
+  #   penalty,\
+  #   outcome_mat)
+  #   )
 
   #print(opt_weights.x)
 
@@ -281,15 +346,12 @@ def main():
   #print(final_weights)
 
 
-  fp_final = forward_prop(layers_size, final_weights)
+  fp_final = forward_prop(a_size, final_weights)
 
   print(fp_final[0])
 
- # print(params)
-
-
-  # ready to test setup and functions - then to invetsigate optimisation and building the class
-  # definintion
+  bloop = power(3)
+  print(bloop(2))
 
 
 if __name__ == "__main__":
